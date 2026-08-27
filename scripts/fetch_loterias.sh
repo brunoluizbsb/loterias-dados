@@ -1,37 +1,43 @@
-name: Atualizar resultados das loterias
+#!/usr/bin/env bash
+# Busca os resultados mais recentes da Lotofácil e da Lotomania direto na API da Caixa
+# e salva em data/lotofacil.json e data/lotomania.json.
+# Roda no servidor do GitHub Actions, então não existe problema de CORS aqui
+# (CORS é uma restrição de navegador; requisição servidor-a-servidor não tem esse bloqueio).
+set -e
 
-on:
-  schedule:
-    # Roda algumas vezes por dia, cobrindo o horário dos sorteios (horário UTC).
-    # Lotofácil sorteia ~20h BRT (23h UTC), Lotomania costuma ser mais cedo.
-    # Rodar várias vezes ao dia garante que o resultado seja pego mesmo se atrasar.
-    - cron: "30 22 * * *"   # 19h30 BRT
-    - cron: "0 0 * * *"     # 21h00 BRT
-    - cron: "0 2 * * *"     # 23h00 BRT
-    - cron: "0 12 * * *"    # 09h00 BRT (manhã seguinte, garante que pegou)
-  workflow_dispatch: {}      # permite rodar manualmente pelo botão "Run workflow" no GitHub
+mkdir -p data
 
-permissions:
-  contents: write
+fetch_latest () {
+  local jogo="$1"
+  local out="$2"
+  echo "Buscando $jogo..."
+  # Tenta a API oficial da Caixa primeiro
+  if curl -sf --max-time 20 \
+      -H "User-Agent: Mozilla/5.0" \
+      "https://servicebus2.caixa.gov.br/portaldeloterias/api/${jogo}/" \
+      -o "$out.tmp"; then
+    if [ -s "$out.tmp" ] && grep -q '"numero"' "$out.tmp"; then
+      mv "$out.tmp" "$out"
+      echo "OK (fonte: Caixa oficial)"
+      return 0
+    fi
+  fi
+  # Fallback: API pública de terceiros
+  if curl -sf --max-time 20 \
+      "https://loteriascaixa-api.herokuapp.com/api/${jogo}/latest" \
+      -o "$out.tmp"; then
+    if [ -s "$out.tmp" ] && grep -q '"concurso"' "$out.tmp"; then
+      mv "$out.tmp" "$out"
+      echo "OK (fonte: loteriascaixa-api)"
+      return 0
+    fi
+  fi
+  echo "AVISO: não foi possível buscar $jogo desta vez (tentaremos de novo no próximo agendamento)."
+  rm -f "$out.tmp"
+  return 0
+}
 
-jobs:
-  atualizar:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Baixar o repositório
-        uses: actions/checkout@v4
+fetch_latest "lotofacil" "data/lotofacil.json"
+fetch_latest "lotomania" "data/lotomania.json"
 
-      - name: Buscar resultados mais recentes
-        run: bash scripts/fetch_loterias.sh
-
-      - name: Publicar mudanças (se houver algo novo)
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/*.json
-          if git diff --cached --quiet; then
-            echo "Nada novo para publicar."
-          else
-            git commit -m "Atualiza resultados das loterias [automático]"
-            git push
-          fi
+echo "Concluído."
